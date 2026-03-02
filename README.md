@@ -2,60 +2,68 @@
 
 AI-powered software development pipeline engine built on [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk).
 
-Describe what you want to build through conversation, and blueprint-sdk automatically generates specs, tests, implementation, and documentation through a deterministic 4-stage pipeline.
+Describe what you want to build through conversation, and blueprint-sdk automatically generates specs, tests, implementation, and documentation.
 
 ## Quick Start
 
 ```bash
-npm install @sizukutamago/blueprint-sdk
-
 # Initialize project config
 npx blueprint-sdk init
 
-# Start interactive mode
+# Start — describe your project, press Enter to run
 npx blueprint-sdk
 ```
 
-## Pipeline
+That's it. You talk, AI builds.
 
 ```
-Stage 1: Spec Generation     → Contract Review Gate
-Stage 2: Test Generation      → Test Review Gate
-Stage 3: Implementation       → Code Review Gate
-Stage 4: Documentation        → Doc Review Gate
+You:  オンライン対戦オセロゲームを作りたい
+You:  バックエンドは Node.js + ws、フロントは Vanilla JS
+(空エンター)
+
+🚀 Pipeline running...
+  ✓ Stage 1: Spec Generation
+  ✓ Stage 2: Test Generation
+  ✓ Stage 3: Implementation
+  ✓ Stage 4: Documentation
 ```
 
-Each stage uses Claude to generate artifacts. Gates validate quality before proceeding (P0 findings block, P1 findings trigger revision cycles).
+## How It Works
 
-## Usage
+```
+You describe → AI interviews → Pipeline auto-runs
 
-### CLI
+  Stage 1: Spec Generation     → Contract Review Gate
+  Stage 2: Test Generation      → Test Review Gate
+  Stage 3: Implementation       → Code Review Gate
+  Stage 4: Documentation        → Doc Review Gate
+```
+
+Each stage uses Claude to generate artifacts. Between stages, **Review Gates** check quality:
+- **P0** (critical) findings → immediate stop
+- **P1** (important) findings → AI auto-fixes and retries (up to 5 cycles)
+- **P2** (minor) findings → noted but don't block
+
+## CLI Options
 
 ```bash
-# Interactive mode (default): conversation → empty Enter to start pipeline
-npx blueprint-sdk
+# Pipeline mode
+npx blueprint-sdk                   # Full: Spec → Test → Implement → Docs
+npx blueprint-sdk --mode tdd        # TDD: Spec → Test (implement yourself)
+npx blueprint-sdk --mode spec       # Spec only (design review)
 
-# Choose pipeline mode
-npx blueprint-sdk --mode full   # Spec → Test → Implement → Docs (default)
-npx blueprint-sdk --mode tdd    # Spec → Test only
-npx blueprint-sdk --mode spec   # Spec only
+# Resume & retry
+npx blueprint-sdk --resume          # Resume from failure point
+npx blueprint-sdk --resume --force  # Re-run completed pipeline
 
-# Resume interrupted pipeline (shows summary, resumes from failure point)
-npx blueprint-sdk --resume
-
-# Force re-run completed pipeline
-npx blueprint-sdk --resume --force
-
-# Non-interactive mode
-npx blueprint-sdk --no-interactive
-
-# Specify working directory
-npx blueprint-sdk --cwd /path/to/project
+# Other
+npx blueprint-sdk --no-interactive  # Skip conversation, run pipeline directly
+npx blueprint-sdk --cwd /path       # Specify working directory
 ```
 
-### Resume Flow
+### Resume
 
-When resuming, blueprint-sdk shows a summary of pipeline state:
+When a gate fails or process crashes, `--resume` picks up where you left off:
 
 ```
 ── 再開サマリー ──────────────────────
@@ -67,9 +75,38 @@ When resuming, blueprint-sdk shows a summary of pipeline state:
 ──────────────────────────────────────
 ```
 
-In interactive mode, you can choose which stage to restart from when failures are detected.
+In interactive mode, you can choose which stage to restart from.
 
-### Library Usage
+## Configuration
+
+```bash
+npx blueprint-sdk init   # Creates .blueprint/ directory
+```
+
+Edit `.blueprint/blueprint.yaml`:
+
+```yaml
+gates:
+  type: review   # "noop" (always PASS) or "review" (AI review)
+```
+
+## Gate Policy
+
+| Condition | Result |
+|-----------|--------|
+| P0 = 0 and P1 ≤ 1 | **PASS** |
+| P0 > 0 | Stop (`p0_found`) |
+| P1 > 1 | Auto-fix up to 5 cycles, then `p1_exceeded` |
+| Reviewer crash | Retry once, then `quorum_not_met` |
+
+---
+
+## Advanced: Library Usage
+
+> For developers who want to embed blueprint-sdk into their own tools.
+
+<details>
+<summary>Programmatic API</summary>
 
 ```typescript
 import {
@@ -94,7 +131,10 @@ const result = await engine.run(state, {
 console.log(result.final_status); // "completed"
 ```
 
-### Custom Gates & Stages
+</details>
+
+<details>
+<summary>Custom Gates & Stages</summary>
 
 ```typescript
 import { createDefaultPipeline } from "@sizukutamago/blueprint-sdk";
@@ -118,39 +158,7 @@ const engine = createDefaultPipeline({
 });
 ```
 
-## Gate Policy
-
-- **P0 = 0 and P1 ≤ 1** → PASS
-- P0 > 0 → Immediate stop (`p0_found`)
-- P1 > 1 → REVISE (max 5 cycles, then `p1_exceeded`)
-- Reviewer failure → Retry once → Gate not met (`quorum_not_met`)
-
-## Configuration
-
-Initialize with `npx blueprint-sdk init`, then edit `.blueprint/blueprint.yaml`:
-
-```yaml
-gates:
-  type: review   # "noop" (always PASS) or "review" (AI review)
-```
-
-## Architecture
-
-```
-src/
-├── index.ts            # Public API exports
-├── engine.ts           # PipelineEngine (sequential stage execution)
-├── presets.ts          # createDefaultPipeline (one-call setup)
-├── query.ts            # claudeQuery / claudeQueryStructured
-├── cli.ts              # CLI entry point (interactive mode)
-├── interactive/        # Interactive mode (conversation, summary)
-├── agents/             # Sub-agents (interviewer, researcher, web-researcher)
-├── gates/              # Gate infrastructure (review, revise, evaluate, normalize)
-├── stages/             # Built-in stage handlers (spec, test-gen, implement, docs)
-├── config/             # Config loading, prompt loader, init
-├── prompts/            # Prompt templates
-└── state.ts            # Pipeline state management (YAML)
-```
+</details>
 
 ## Development
 
