@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as p from "@clack/prompts";
 import { createDefaultPipeline } from "./presets.js";
 import { createInitialState, loadState, saveState, getStatePath } from "./state.js";
+import { PipelineEngine, PIPELINE_ORDER } from "./engine.js";
 import { claudeQuery } from "./query.js";
 import { generateTaskDescription } from "./interactive/summary.js";
 import { generateFollowUpQuestion } from "./agents/interviewer.js";
@@ -12,7 +13,8 @@ import { runResearcher } from "./agents/researcher.js";
 import { runWebResearcher } from "./agents/web-researcher.js";
 import { runParallel } from "./agents/parallel-runner.js";
 import type { ConversationEntry } from "./interactive/summary.js";
-import type { PipelineOptions, PipelineMode, StageId, QueryFn } from "./types.js";
+import type { PipelineOptions, PipelineState, PipelineMode, StageId, QueryFn } from "./types.js";
+import type { ResumeInfo } from "./engine.js";
 import { toErrorMessage } from "./utils/to-error-message.js";
 import { initBlueprint } from "./config/init.js";
 
@@ -94,6 +96,35 @@ function hasPreviousState(projectRoot: string): boolean {
   return fs.existsSync(getStatePath(projectRoot));
 }
 
+function statusIcon(status: string): string {
+  switch (status) {
+    case "completed":
+    case "passed":
+      return "✓";
+    case "failed":
+      return "✗";
+    case "in_progress":
+      return "…";
+    default:
+      return " ";
+  }
+}
+
+function formatResumeSummary(state: PipelineState, info: ResumeInfo): string {
+  const lines: string[] = [];
+  for (const stageId of PIPELINE_ORDER) {
+    const s = state.stages[stageId];
+    const icon = statusIcon(s.status);
+    const label = STAGE_LABELS[stageId];
+    const status = statusLabel(s.status);
+    lines.push(`  ${icon} ${label} ... ${status}`);
+  }
+  if (info.nextStage) {
+    lines.push(`  → ${STAGE_LABELS[info.nextStage]} から再開`);
+  }
+  return lines.join("\n");
+}
+
 async function runInteractive(
   args: CliArgs,
   projectRoot: string,
@@ -154,6 +185,82 @@ async function runInteractive(
       resume = true;
     }
   }
+
+  // -----------------------------------------------------------------------
+  // resume パス: spec 完了済みならインタビューをスキップ
+  // -----------------------------------------------------------------------
+  if (resume) {
+    const loaded = loadState(projectRoot);
+    const info = PipelineEngine.getResumeInfo(loaded);
+
+    // 全完了 → force がなければ終了
+    if (info.isFullyCompleted && !args.force) {
+      p.note(formatResumeSummary(loaded, info), "再開サマリー");
+      p.log.success("全てのステージが完了済みです。--force で再実行できます。");
+      p.outro("完了済み");
+      return;
+    }
+
+    // サマリー表示
+    p.note(formatResumeSummary(loaded, info), "再開サマリー");
+
+    // 失敗ステージがある場合: ステージ選択
+    let startFromStage: StageId | undefined;
+    if (info.failedStages.length > 0) {
+      type StageChoice = "auto" | "force" | StageId;
+      const choiceOptions: Array<{ value: StageChoice; label: string; hint?: string }> = [
+        {
+          value: "auto" as const,
+          label: "自動検出",
+          hint: info.nextStage ? `${STAGE_LABELS[info.nextStage]} から` : undefined,
+        },
+        ...info.failedStages.map((gateId) => ({
+          value: gateId as StageChoice,
+          label: STAGE_LABELS[gateId],
+          hint: "失敗したステージから再実行",
+        })),
+        {
+          value: "force" as const,
+          label: "最初からやり直す",
+        },
+      ];
+
+      const choice = await p.select({
+        message: "どこから再開しますか？",
+        options: choiceOptions,
+      });
+
+      if (p.isCancel(choice)) {
+        p.cancel("キャンセルしました");
+        process.exit(0);
+      }
+
+      if (choice === "force") {
+        // 最初からやり直す → 通常フローへ
+        resume = false;
+      } else if (choice !== "auto") {
+        startFromStage = choice;
+      }
+    }
+
+    // resume が維持されている場合 → パイプライン直行
+    if (resume) {
+      await runPipeline({
+        projectRoot,
+        queryFn,
+        state: loaded,
+        resume: true,
+        force: args.force,
+        mode,
+        startFromStage,
+      });
+      return;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 通常パス（新規 or 最初からやり直し）: インタビュー → パイプライン
+  // -----------------------------------------------------------------------
 
   // Step 1: 初回入力
   const firstInput = await p.text({
@@ -315,20 +422,41 @@ async function runInteractive(
     return;
   }
 
-  // Step 4: パイプライン実行
-  const state = resume
-    ? loadState(projectRoot)
-    : createInitialState(projectRoot);
+  // Step 5: パイプライン実行
+  await runPipeline({
+    projectRoot,
+    queryFn,
+    state: createInitialState(projectRoot),
+    resume: false,
+    force: args.force,
+    mode,
+    taskDescription,
+  });
+}
+
+interface RunPipelineArgs {
+  projectRoot: string;
+  queryFn: QueryFn;
+  state: PipelineState;
+  resume: boolean;
+  force: boolean;
+  mode: PipelineMode;
+  taskDescription?: string;
+  startFromStage?: StageId;
+}
+
+async function runPipeline(args: RunPipelineArgs): Promise<void> {
+  const { projectRoot, queryFn, state, mode, taskDescription, startFromStage } = args;
 
   const engine = createDefaultPipeline({ queryFn, cwd: projectRoot, taskDescription });
-
   const stageSpinner = p.spinner({ indicator: "timer" });
 
   const options: PipelineOptions = {
     cwd: projectRoot,
-    resume,
+    resume: args.resume,
     force: args.force,
     mode,
+    startFromStage,
     onStageStart: (stageId) => stageSpinner.start(`${STAGE_LABELS[stageId]}...`),
     onStageComplete: (stageId, result) => stageSpinner.stop(`${STAGE_LABELS[stageId]} → ${statusLabel(result.status)}`),
   };
@@ -345,6 +473,14 @@ async function runInteractive(
   }
 }
 
+function printResumeSummary(state: PipelineState, info: ResumeInfo): void {
+  console.log("[blueprint] ── 再開サマリー ──");
+  for (const line of formatResumeSummary(state, info).split("\n")) {
+    console.log(`[blueprint] ${line}`);
+  }
+  console.log("[blueprint] ─────────────────");
+}
+
 async function runNonInteractive(
   args: CliArgs,
   projectRoot: string,
@@ -353,6 +489,17 @@ async function runNonInteractive(
   const state = args.resume
     ? loadState(projectRoot)
     : createInitialState(projectRoot);
+
+  // resume 時: サマリー表示 + 完了済みチェック
+  if (args.resume) {
+    const info = PipelineEngine.getResumeInfo(state);
+    printResumeSummary(state, info);
+
+    if (info.isFullyCompleted && !args.force) {
+      console.log("[blueprint] 全てのステージが完了済みです。--force で再実行できます。");
+      return;
+    }
+  }
 
   const engine = createDefaultPipeline({ queryFn, cwd: projectRoot });
 

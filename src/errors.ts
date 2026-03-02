@@ -8,10 +8,12 @@ export class PipelineError extends Error {
   }
 }
 
+import type { GateFailReason } from "./types.js";
+
 export class GateFailedError extends PipelineError {
   constructor(
     gate: string,
-    public readonly reason: "p0_found" | "p1_exceeded" | "quorum_not_met",
+    public readonly reason: GateFailReason,
   ) {
     super(`Gate "${gate}" failed: ${reason}`, gate);
     this.name = "GateFailedError";

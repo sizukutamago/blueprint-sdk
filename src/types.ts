@@ -100,6 +100,8 @@ export interface PipelineOptions {
   resume: boolean;
   force: boolean;
   mode?: PipelineMode;
+  /** 指定ステージから強制開始（resume 時に特定ゲートから再実行する場合） */
+  startFromStage?: StageId;
   onStageStart?: (stageId: StageId) => void;
   onStageComplete?: (stageId: StageId, result: StageResult) => void;
 }
@@ -116,11 +118,13 @@ export type StageHandler = (
   options: PipelineOptions,
 ) => Promise<StageResult>;
 
+export type GateFailReason = "p0_found" | "p1_exceeded" | "quorum_not_met";
+
 export interface GateResult {
   status: "passed" | "failed";
   counts: GateCounts;
   findings: Finding[];
-  reason?: "p0_found" | "p1_exceeded" | "quorum_not_met";
+  reason?: GateFailReason;
 }
 
 export type QueryFn = (prompt: string) => Promise<string>;

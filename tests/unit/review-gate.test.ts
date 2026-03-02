@@ -120,9 +120,9 @@ describe("runReviewGate", () => {
   });
 
   // -------------------------------------------------------------------------
-  // P1 > 1 → gate fails with reason p1_exceeded
+  // P1 > 1 (default maxP1) → gate fails with reason p1_exceeded
   // -------------------------------------------------------------------------
-  it("fails with reason p1_exceeded when P1 count exceeds 1", async () => {
+  it("fails with p1_exceeded when P1 count exceeds default maxP1", async () => {
     const r1 = makeSuccessReviewer(
       [makeFinding("P1", { target: "SvcA", field: "m1" })],
       "reviewer-a",

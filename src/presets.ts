@@ -77,7 +77,7 @@ export function createDefaultPipeline(
 
   function defaultGate(gate: "contract" | "test" | "code" | "doc"): StageHandler {
     if (gateType === "review" && cwd) {
-      return createReviewGateHandler({ gate, queryFn, projectRoot: cwd });
+      return createReviewGateHandler({ gate, projectRoot: cwd });
     }
     return createNoopGateHandler();
   }

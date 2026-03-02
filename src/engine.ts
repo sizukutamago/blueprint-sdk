@@ -6,11 +6,13 @@ import type {
   PipelineMode,
   StageResult,
   GateState,
+  GateFailReason,
 } from "./types.js";
 import { saveState } from "./state.js";
 import { PipelineError, GateFailedError } from "./errors.js";
+import { toErrorMessage } from "./utils/to-error-message.js";
 
-const PIPELINE_ORDER: StageId[] = [
+export const PIPELINE_ORDER: StageId[] = [
   "stage_1_spec",
   "contract_review_gate",
   "stage_2_test",
@@ -20,6 +22,15 @@ const PIPELINE_ORDER: StageId[] = [
   "stage_4_docs",
   "doc_review_gate",
 ];
+
+export interface ResumeInfo {
+  resumeIndex: number;
+  completedStages: StageId[];
+  failedStages: StageId[];
+  stuckStages: StageId[];
+  nextStage: StageId | null;
+  isFullyCompleted: boolean;
+}
 
 const MODE_STOP_AFTER: Record<PipelineMode, StageId> = {
   spec: "contract_review_gate",
@@ -36,7 +47,8 @@ export class PipelineEngine {
 
   async run(state: PipelineState, options: PipelineOptions): Promise<PipelineState> {
     const startIndex = options.force ? 0
-      : options.resume ? this.findResumePoint(state)
+      : options.startFromStage ? PIPELINE_ORDER.indexOf(options.startFromStage)
+      : options.resume ? PipelineEngine.getResumeInfo(state).resumeIndex
       : 0;
 
     for (let i = startIndex; i < PIPELINE_ORDER.length; i++) {
@@ -64,7 +76,26 @@ export class PipelineEngine {
       this.markInProgress(state, stageId);
       saveState(state);
 
-      const result = await handler(state, options);
+      let result: StageResult;
+      try {
+        result = await handler(state, options);
+      } catch (err) {
+        // PipelineError 系はステージを failed + aborted にして re-throw
+        if (err instanceof PipelineError) {
+          this.markFailed(state, stageId);
+          state.final_status = "aborted";
+          saveState(state);
+          throw err;
+        }
+        // 予期しないエラー: ステージを failed + aborted にして PipelineError でラップ
+        this.markFailed(state, stageId);
+        state.final_status = "aborted";
+        saveState(state);
+        throw new PipelineError(
+          `Stage "${stageId}" failed unexpectedly: ${toErrorMessage(err)}`,
+          stageId,
+        );
+      }
 
       this.applyResult(state, stageId, result);
       options.onStageComplete?.(stageId, result);
@@ -73,11 +104,8 @@ export class PipelineEngine {
       if (this.isGate(stageId) && result.status === "failed") {
         state.final_status = "aborted";
         saveState(state);
-        const gateResult = result as StageResult & { reason?: string };
-        throw new GateFailedError(
-          stageId,
-          (gateResult.reason as "p0_found" | "p1_exceeded" | "quorum_not_met") ?? "p0_found",
-        );
+        const reason = this.toGateFailReason(result.reason);
+        throw new GateFailedError(stageId, reason);
       }
 
       saveState(state);
@@ -96,18 +124,80 @@ export class PipelineEngine {
     return state;
   }
 
-  private findResumePoint(state: PipelineState): number {
+  static getResumeInfo(state: PipelineState): ResumeInfo {
+    const failedStages: StageId[] = [];
+    const stuckStages: StageId[] = [];
+
+    for (const stageId of PIPELINE_ORDER) {
+      const s = state.stages[stageId];
+      if (s.status === "failed") failedStages.push(stageId);
+      if (s.status === "in_progress") stuckStages.push(stageId);
+    }
+
+    // in_progress のステージがあれば、最後の in_progress から再開
+    if (stuckStages.length > 0) {
+      const lastStuck = stuckStages[stuckStages.length - 1]!;
+      const resumeIndex = PIPELINE_ORDER.indexOf(lastStuck);
+      return {
+        resumeIndex,
+        completedStages: PIPELINE_ORDER.slice(0, resumeIndex),
+        failedStages,
+        stuckStages,
+        nextStage: lastStuck,
+        isFullyCompleted: false,
+      };
+    }
+
+    // 従来ロジック: 最後の completed/passed の次から再開
     for (let i = PIPELINE_ORDER.length - 1; i >= 0; i--) {
       const stageId = PIPELINE_ORDER[i]!;
-      const stageState = state.stages[stageId];
-      if (
-        stageState.status === "completed" ||
-        ("status" in stageState && stageState.status === "passed")
-      ) {
-        return i + 1;
+      const s = state.stages[stageId];
+      if (s.status === "completed" || s.status === "passed") {
+        const resumeIndex = i + 1;
+        return {
+          resumeIndex,
+          completedStages: PIPELINE_ORDER.slice(0, resumeIndex),
+          failedStages,
+          stuckStages,
+          nextStage: resumeIndex < PIPELINE_ORDER.length ? PIPELINE_ORDER[resumeIndex]! : null,
+          isFullyCompleted: resumeIndex >= PIPELINE_ORDER.length,
+        };
       }
     }
-    return 0;
+
+    return {
+      resumeIndex: 0,
+      completedStages: [],
+      failedStages,
+      stuckStages,
+      nextStage: PIPELINE_ORDER[0]!,
+      isFullyCompleted: false,
+    };
+  }
+
+  private markFailed(state: PipelineState, stageId: StageId): void {
+    const stage = state.stages[stageId];
+    if (this.isGate(stageId)) {
+      (stage as GateState).status = "failed";
+    } else {
+      stage.status = "failed" as never;
+    }
+  }
+
+  private static readonly VALID_GATE_FAIL_REASONS: ReadonlySet<string> = new Set<GateFailReason>([
+    "p0_found",
+    "p1_exceeded",
+    "quorum_not_met",
+  ]);
+
+  private toGateFailReason(reason: string | undefined): GateFailReason {
+    if (reason && PipelineEngine.VALID_GATE_FAIL_REASONS.has(reason)) {
+      return reason as GateFailReason;
+    }
+    if (reason) {
+      console.error(`[blueprint] Unknown gate fail reason "${reason}", defaulting to "p0_found"`);
+    }
+    return "p0_found";
   }
 
   private isGate(stageId: StageId): boolean {

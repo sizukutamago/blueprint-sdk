@@ -1,5 +1,6 @@
 // Engine
-export { PipelineEngine } from "./engine.js";
+export { PipelineEngine, PIPELINE_ORDER } from "./engine.js";
+export type { ResumeInfo } from "./engine.js";
 export { createInitialState, loadState, saveState, getStatePath } from "./state.js";
 export {
   PipelineError,
@@ -31,8 +32,8 @@ export type { DefaultPipelineOptions } from "./presets.js";
 export { createNoopGateHandler } from "./gates/noop-gate.js";
 
 // Query utility
-export { claudeQuery } from "./query.js";
-export type { ClaudeQueryOptions } from "./query.js";
+export { claudeQuery, claudeQueryStructured } from "./query.js";
+export type { ClaudeQueryOptions, OutputFormat, ClaudeQueryResult } from "./query.js";
 
 // Interactive mode
 export { runConversationLoop } from "./interactive/conversation.js";
@@ -59,6 +60,7 @@ export type {
   PipelineOptions,
   StageResult,
   StageHandler,
+  GateFailReason,
   GateResult,
   QueryFn,
 } from "./types.js";

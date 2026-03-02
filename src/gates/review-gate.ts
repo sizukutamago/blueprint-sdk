@@ -1,6 +1,7 @@
 import type { Finding, GateResult, ReviewOutput } from "../types.js";
 import { deduplicateFindings } from "./normalize.js";
 import { countFindings, evaluateGatePolicy } from "./evaluate.js";
+import { toErrorMessage } from "../utils/to-error-message.js";
 
 export type ReviewerFn = () => Promise<ReviewOutput>;
 
@@ -13,11 +14,16 @@ export interface ReviewGateOptions {
 async function runWithRetry(
   reviewer: ReviewerFn,
   maxRetries: number,
+  index: number,
 ): Promise<ReviewOutput | null> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await reviewer();
-    } catch {
+    } catch (err) {
+      console.error(
+        `[blueprint] Reviewer #${index + 1} attempt ${attempt + 1}/${maxRetries + 1} failed:`,
+        toErrorMessage(err),
+      );
       if (attempt === maxRetries) return null;
     }
   }
@@ -30,7 +36,7 @@ export async function runReviewGate(
   const maxRetries = options.maxRetries ?? 1;
 
   const results = await Promise.all(
-    options.reviewers.map((r) => runWithRetry(r, maxRetries)),
+    options.reviewers.map((r, i) => runWithRetry(r, maxRetries, i)),
   );
 
   // Quorum check: if any reviewer failed after all retries

@@ -1,3 +1,5 @@
+import { toErrorMessage } from "../utils/to-error-message.js";
+
 export interface ParallelTask<T> {
   name: string;
   fn: () => Promise<T>;
@@ -18,8 +20,7 @@ export async function runParallel<T>(
     if (r.status === "fulfilled") {
       return { name: task.name, result: r.value };
     }
-    const reason = r.reason;
-    const error = reason instanceof Error ? reason.message : String(reason);
+    const error = toErrorMessage(r.reason);
     return { name: task.name, result: null, error };
   });
 }

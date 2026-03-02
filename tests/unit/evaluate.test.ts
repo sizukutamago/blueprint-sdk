@@ -63,7 +63,7 @@ describe("evaluateGatePolicy", () => {
     expect(result.reason).toBeUndefined();
   });
 
-  it("passes at the boundary: P0=0 and P1=1", () => {
+  it("passes at the boundary: P0=0 and P1=1 (default maxP1)", () => {
     const result = evaluateGatePolicy({ p0: 0, p1: 1, p2: 0 });
     expect(result.passed).toBe(true);
     expect(result.reason).toBeUndefined();
@@ -75,14 +75,20 @@ describe("evaluateGatePolicy", () => {
     expect(result.reason).toBe("p0_found");
   });
 
-  it("fails when P1 > 1 with reason p1_exceeded", () => {
+  it("fails when P1 > maxP1 (default 1) with reason p1_exceeded", () => {
     const result = evaluateGatePolicy({ p0: 0, p1: 2, p2: 0 });
     expect(result.passed).toBe(false);
     expect(result.reason).toBe("p1_exceeded");
   });
 
-  it("fails with p0_found when both P0 > 0 and P1 > 1 (p0 takes precedence)", () => {
-    const result = evaluateGatePolicy({ p0: 1, p1: 2, p2: 5 });
+  it("respects custom maxP1 option", () => {
+    const result = evaluateGatePolicy({ p0: 0, p1: 2, p2: 0 }, { maxP1: 1 });
+    expect(result.passed).toBe(false);
+    expect(result.reason).toBe("p1_exceeded");
+  });
+
+  it("fails with p0_found when both P0 > 0 and P1 > maxP1 (p0 takes precedence)", () => {
+    const result = evaluateGatePolicy({ p0: 1, p1: 11, p2: 5 });
     expect(result.passed).toBe(false);
     expect(result.reason).toBe("p0_found");
   });

@@ -591,4 +591,259 @@ describe("PipelineEngine", () => {
       ]);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 8. getResumeInfo
+  // -------------------------------------------------------------------------
+  describe("getResumeInfo", () => {
+    it("returns all stages completed when pipeline is fully done", () => {
+      const state = createInitialState("/tmp/test");
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "completed";
+      state.stages.test_review_gate.status = "passed";
+      state.stages.stage_3_implement.status = "completed";
+      state.stages.code_review_gate.status = "passed";
+      state.stages.stage_4_docs.status = "completed";
+      state.stages.doc_review_gate.status = "passed";
+
+      const info = PipelineEngine.getResumeInfo(state);
+
+      expect(info.isFullyCompleted).toBe(true);
+      expect(info.nextStage).toBeNull();
+      expect(info.completedStages).toEqual(PIPELINE_ORDER);
+      expect(info.failedStages).toEqual([]);
+      expect(info.stuckStages).toEqual([]);
+    });
+
+    it("returns first stage when nothing is completed", () => {
+      const state = createInitialState("/tmp/test");
+
+      const info = PipelineEngine.getResumeInfo(state);
+
+      expect(info.isFullyCompleted).toBe(false);
+      expect(info.resumeIndex).toBe(0);
+      expect(info.nextStage).toBe("stage_1_spec");
+      expect(info.completedStages).toEqual([]);
+    });
+
+    it("identifies the correct resume point after partial completion", () => {
+      const state = createInitialState("/tmp/test");
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "completed";
+
+      const info = PipelineEngine.getResumeInfo(state);
+
+      expect(info.resumeIndex).toBe(3);
+      expect(info.nextStage).toBe("test_review_gate");
+      expect(info.completedStages).toEqual([
+        "stage_1_spec",
+        "contract_review_gate",
+        "stage_2_test",
+      ]);
+    });
+
+    it("resumes from in_progress stage instead of falling back to 0", () => {
+      const state = createInitialState("/tmp/test");
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "in_progress"; // crashed mid-stage
+
+      const info = PipelineEngine.getResumeInfo(state);
+
+      expect(info.resumeIndex).toBe(2); // re-run stage_2_test
+      expect(info.nextStage).toBe("stage_2_test");
+      expect(info.stuckStages).toEqual(["stage_2_test"]);
+      expect(info.completedStages).toEqual([
+        "stage_1_spec",
+        "contract_review_gate",
+      ]);
+    });
+
+    it("collects failed stages", () => {
+      const state = createInitialState("/tmp/test");
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "failed";
+
+      const info = PipelineEngine.getResumeInfo(state);
+
+      expect(info.failedStages).toEqual(["contract_review_gate"]);
+      expect(info.nextStage).toBe("contract_review_gate");
+      expect(info.resumeIndex).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Handler error recovery
+  // -------------------------------------------------------------------------
+  describe("handler error recovery", () => {
+    it("marks stage as failed and aborts when handler throws unexpected error", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      const throwingHandler: StageHandler = vi.fn(async () => {
+        throw new Error("Unexpected LLM timeout");
+      });
+
+      registerAllHandlers(engine, callOrder, {
+        stage_2_test: throwingHandler,
+      });
+
+      await expect(engine.run(state, DEFAULT_OPTIONS)).rejects.toThrow(
+        PipelineError,
+      );
+
+      expect(state.stages.stage_2_test.status).toBe("failed");
+      expect(state.final_status).toBe("aborted");
+    });
+
+    it("preserves state via saveState on handler error", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      const throwingHandler: StageHandler = vi.fn(async () => {
+        throw new Error("crash");
+      });
+
+      registerAllHandlers(engine, callOrder, {
+        stage_1_spec: throwingHandler,
+      });
+
+      try {
+        await engine.run(state, DEFAULT_OPTIONS);
+      } catch {
+        // expected
+      }
+
+      const mockSaveState = vi.mocked(saveState);
+      const lastCall = mockSaveState.mock.calls.at(-1);
+      expect(lastCall).toBeDefined();
+      expect(lastCall![0].final_status).toBe("aborted");
+    });
+
+    it("re-throws GateFailedError without wrapping", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      // Gate handler that throws GateFailedError directly
+      const throwingGateHandler: StageHandler = vi.fn(async () => {
+        throw new GateFailedError("contract_review_gate", "p0_found");
+      });
+
+      registerAllHandlers(engine, callOrder, {
+        contract_review_gate: throwingGateHandler,
+      });
+
+      await expect(engine.run(state, DEFAULT_OPTIONS)).rejects.toThrow(
+        GateFailedError,
+      );
+    });
+
+    it("does not call subsequent stages after handler error", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      const throwingHandler: StageHandler = vi.fn(async () => {
+        callOrder.push("stage_2_test");
+        throw new Error("boom");
+      });
+
+      registerAllHandlers(engine, callOrder, {
+        stage_2_test: throwingHandler,
+      });
+
+      try {
+        await engine.run(state, DEFAULT_OPTIONS);
+      } catch {
+        // expected
+      }
+
+      expect(callOrder).toEqual(["stage_1_spec", "contract_review_gate", "stage_2_test"]);
+      expect(callOrder).not.toContain("test_review_gate");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. startFromStage option
+  // -------------------------------------------------------------------------
+  describe("startFromStage option", () => {
+    it("starts from the specified stage, skipping earlier stages", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "completed";
+      state.stages.test_review_gate.status = "failed";
+
+      registerAllHandlers(engine, callOrder);
+
+      await engine.run(state, {
+        ...DEFAULT_OPTIONS,
+        resume: true,
+        startFromStage: "test_review_gate",
+      });
+
+      expect(callOrder[0]).toBe("test_review_gate");
+      expect(callOrder).not.toContain("stage_1_spec");
+      expect(callOrder).not.toContain("stage_2_test");
+    });
+
+    it("startFromStage takes precedence over auto resume point", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      // All completed, but we want to re-run from stage_3_implement
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "completed";
+      state.stages.test_review_gate.status = "passed";
+      state.stages.stage_3_implement.status = "completed";
+      state.stages.code_review_gate.status = "passed";
+
+      registerAllHandlers(engine, callOrder);
+
+      await engine.run(state, {
+        ...DEFAULT_OPTIONS,
+        resume: true,
+        startFromStage: "stage_3_implement",
+      });
+
+      expect(callOrder[0]).toBe("stage_3_implement");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 11. Resume from in_progress stage (integration)
+  // -------------------------------------------------------------------------
+  describe("resume from in_progress stage", () => {
+    it("re-runs the stuck stage and continues from there", async () => {
+      const engine = new PipelineEngine();
+      const state = createInitialState("/tmp/test");
+      const callOrder: StageId[] = [];
+
+      state.stages.stage_1_spec.status = "completed";
+      state.stages.contract_review_gate.status = "passed";
+      state.stages.stage_2_test.status = "in_progress"; // crashed
+
+      registerAllHandlers(engine, callOrder);
+
+      await engine.run(state, { ...DEFAULT_OPTIONS, resume: true });
+
+      expect(callOrder[0]).toBe("stage_2_test");
+      expect(callOrder).not.toContain("stage_1_spec");
+      expect(callOrder).not.toContain("contract_review_gate");
+    });
+  });
 });

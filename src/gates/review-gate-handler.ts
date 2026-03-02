@@ -1,12 +1,14 @@
-import type { StageHandler, StageResult, QueryFn, Finding } from "../types.js";
+import type { StageHandler, StageResult, Finding } from "../types.js";
 import { loadPromptFile } from "../config/prompt-loader.js";
-import { runReviewGate, type ReviewerFn } from "./review-gate.js";
+import { claudeQuery, type ClaudeQueryOptions } from "../query.js";
+import { type ReviewerFn } from "./review-gate.js";
+import { runReviseLoop } from "./revise.js";
 import { parseReviewOutput } from "./schemas.js";
 import { toErrorMessage } from "../utils/to-error-message.js";
 
 export interface ReviewGateHandlerOptions {
   gate: "contract" | "test" | "code" | "doc";
-  queryFn: QueryFn;
+  claudeQueryFn?: (prompt: string, options?: ClaudeQueryOptions) => Promise<string>;
   projectRoot?: string;
   reviewerCount?: number;
 }
@@ -25,68 +27,213 @@ const DEFAULT_REVIEWER_COUNT = {
   doc: 3,
 } as const;
 
-function createReviewer(
-  queryFn: QueryFn,
-  reviewPrompt: string,
-  agentIndex: number,
-  projectRoot: string,
-): ReviewerFn {
-  return async () => {
-    const prompt = `${reviewPrompt}
+type GateKind = ReviewGateHandlerOptions["gate"];
 
-You are reviewer agent #${agentIndex + 1}.
-Review the project at: ${projectRoot}
+const SEVERITY_RULES: Record<GateKind, string> = {
+  contract: `STRICT SEVERITY RULES — you MUST follow these exactly:
+- P0: ONLY for YAML parse failures or completely missing id field (id key absent)
+- P1: Missing type info, missing returns, ambiguous specs that prevent test generation
+- P2: Naming conventions (e.g. CON-* prefix), missing metadata (version/status/owner), style issues
+IMPORTANT: ID naming format (e.g. "int-001" vs "CON-xxx") is ALWAYS P2, never P0.`,
+  test: `STRICT SEVERITY RULES — you MUST follow these exactly:
+- P0: Test file fails to compile or has syntax errors
+- P1: Missing test coverage for critical paths, incorrect assertions, missing edge cases
+- P2: Test naming conventions, missing descriptions, code style issues`,
+  code: `STRICT SEVERITY RULES — you MUST follow these exactly:
+- P0: Runtime crashes, security vulnerabilities, data corruption risks
+- P1: Logic errors, missing error handling, contract violations, type safety issues
+- P2: Code style, naming conventions, minor refactoring suggestions`,
+  doc: `STRICT SEVERITY RULES — you MUST follow these exactly:
+- P0: Documentation references non-existent APIs or contains dangerous instructions
+- P1: Missing documentation for public APIs, incorrect usage examples, outdated information
+- P2: Typos, formatting issues, style inconsistencies`,
+};
 
-Respond with a JSON object following this exact format:
+const REVISE_TARGETS: Record<GateKind, string> = {
+  contract: "Focus on the contract YAML files in .blueprint/contracts/",
+  test: "Focus on the test files in the tests/ directory",
+  code: "Focus on the source code files in src/",
+  doc: "Focus on the documentation files in docs/",
+};
+
+/** Phase 2 で使う JSON 変換プロンプト */
+const JSON_CONVERSION_PROMPT = `You are a data converter. Your ONLY task is to convert the review text below into a JSON object.
+
+CRITICAL: Output ONLY a JSON code block. No other text before or after.
+
+\`\`\`json
 {
-  "reviewer": "Agent ${agentIndex + 1}",
-  "gate": "...",
+  "reviewer": "<reviewer name>",
+  "gate": "<gate name>",
   "findings": [
     {
-      "severity": "P0" | "P1" | "P2",
-      "target": "CON-xxx or file path",
+      "severity": "P0 or P1 or P2",
+      "target": "contract ID or file path",
       "field": "field name",
       "message": "issue description",
       "suggestion": "fix suggestion"
     }
   ],
-  "summary": { "p0": 0, "p1": 0, "p2": 0 }
-}`;
+  "summary": { "p0": <count>, "p1": <count>, "p2": <count> }
+}
+\`\`\`
 
-    const response = await queryFn(prompt);
-    // queryFn は文字列を返すので JSON パースしてから検証
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(response);
-    } catch {
-      // JSON 以外のテキストが含まれる場合、JSON 部分を抽出
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsed = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error("No valid JSON found in review response");
-      }
-    }
+If the review found NO issues, output:
+\`\`\`json
+{"reviewer":"<name>","gate":"<gate>","findings":[],"summary":{"p0":0,"p1":0,"p2":0}}
+\`\`\`
+`;
+
+/**
+ * 2 フェーズレビュアー:
+ * Phase 1 — ツール付きでファイルを読んでレビュー（テキスト出力）
+ * Phase 2 — レビュー結果をツールなし + JSON 指示で構造化変換
+ */
+function createReviewer(
+  gate: GateKind,
+  reviewPrompt: string,
+  agentIndex: number,
+  projectRoot: string,
+  queryFn: (prompt: string, options?: ClaudeQueryOptions) => Promise<string>,
+): ReviewerFn {
+  return async () => {
+    const severityRules = SEVERITY_RULES[gate];
+
+    // Phase 1: ツール付きレビュー
+    const reviewText = await queryFn(
+      `${reviewPrompt}
+
+You are reviewer agent #${agentIndex + 1} for the "${gate}" review gate.
+Review the project at: ${projectRoot}
+
+Read the relevant files using Read/Glob/Grep tools, then provide your detailed review.
+
+${severityRules}
+
+If there are no issues, explicitly state that no issues were found.`,
+      {
+        cwd: projectRoot,
+        maxTurns: 5,
+        tools: ["Read", "Glob", "Grep"],
+      },
+    );
+
+    // Phase 2: ツールなしで JSON 変換（1ターンで完了）
+    const jsonResponse = await queryFn(
+      `${JSON_CONVERSION_PROMPT}
+
+reviewer: "reviewer-${agentIndex + 1}"
+gate: "${gate}"
+
+Review text to convert:
+---
+${reviewText}
+---`,
+      {
+        cwd: projectRoot,
+        maxTurns: 3,
+        permissionMode: "default",
+      },
+    );
+
+    const parsed = extractJsonFromText(jsonResponse);
     return parseReviewOutput(parsed);
+  };
+}
+
+/** テキストレスポンスから JSON を抽出するフォールバック */
+function extractJsonFromText(response: string): unknown {
+  try {
+    return JSON.parse(response);
+  } catch {
+    // noop
+  }
+
+  const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch?.[1]) {
+    try {
+      return JSON.parse(codeBlockMatch[1]);
+    } catch {
+      // noop
+    }
+  }
+
+  const jsonMatch = response.match(/\{[\s\S]*"findings"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {
+      // noop
+    }
+  }
+
+  throw new Error("No valid JSON found in review response");
+}
+
+/** findings を元に成果物を修正する onRevise コールバックを生成 */
+function createOnRevise(
+  gate: GateKind,
+  projectRoot: string,
+  queryFn: (prompt: string, options?: ClaudeQueryOptions) => Promise<string>,
+): (findings: Finding[], cycle: number) => Promise<void> {
+  return async (findings, cycle) => {
+    const findingsSummary = findings
+      .filter((f) => f.severity === "P0" || f.severity === "P1")
+      .map((f) => `[${f.severity}] ${f.target} / ${f.field}: ${f.message}${f.suggestion ? ` → ${f.suggestion}` : ""}`)
+      .join("\n");
+
+    console.error(`[blueprint] REVISE cycle ${cycle}: ${findings.length} findings を修正中...`);
+
+    const reviseTarget = REVISE_TARGETS[gate];
+
+    await queryFn(
+      `You are a revision agent for the "${gate}" review gate (cycle ${cycle}).
+The project is at: ${projectRoot}
+
+The following review findings need to be addressed by modifying the relevant files.
+Fix ALL P0 and P1 issues. P2 issues are optional but appreciated.
+
+Findings to fix:
+${findingsSummary}
+
+Instructions:
+- Read the target files using Read/Glob tools
+- Edit the files to address each finding
+- ${reviseTarget}
+- Do NOT create new files unless absolutely necessary
+- Make minimal, targeted changes`,
+      {
+        cwd: projectRoot,
+        maxTurns: 8,
+        tools: ["Read", "Glob", "Grep", "Edit", "Write"],
+        permissionMode: "bypassPermissions",
+      },
+    );
   };
 }
 
 export function createReviewGateHandler(
   options: ReviewGateHandlerOptions,
 ): StageHandler {
-  const { gate, queryFn, reviewerCount } = options;
+  const { gate, reviewerCount } = options;
   const count = reviewerCount ?? DEFAULT_REVIEWER_COUNT[gate];
+  const queryFn = options.claudeQueryFn ?? claudeQuery;
 
   return async (state, _pipelineOptions): Promise<StageResult> => {
     const projectRoot = options.projectRoot ?? state.project_root;
     const reviewPrompt = loadPromptFile(GATE_PROMPT_MAP[gate], projectRoot);
 
     const reviewers: ReviewerFn[] = Array.from({ length: count }, (_, i) =>
-      createReviewer(queryFn, reviewPrompt, i, projectRoot),
+      createReviewer(gate, reviewPrompt, i, projectRoot, queryFn),
     );
 
     try {
-      const result = await runReviewGate({ gate, reviewers });
+      const result = await runReviseLoop({
+        gate,
+        reviewers,
+        maxCycles: 5,
+        onRevise: createOnRevise(gate, projectRoot, queryFn),
+      });
       return {
         status: result.status,
         counts: result.counts,
