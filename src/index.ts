@@ -70,3 +70,14 @@ export { runResearcher } from "./agents/researcher.js";
 export { runWebResearcher } from "./agents/web-researcher.js";
 export { generateFollowUpQuestion } from "./agents/interviewer.js";
 export type { QuestionResult, ResearchTarget } from "./agents/interviewer.js";
+
+// Config
+export { loadConfig } from "./config/loader.js";
+export { DEFAULT_CONFIG, } from "./config/defaults.js";
+export { BlueprintConfigSchema } from "./config/schema.js";
+export type { BlueprintConfig } from "./config/schema.js";
+export { loadPromptFile, getPromptsDir } from "./config/prompt-loader.js";
+
+// Review Gate Handler
+export { createReviewGateHandler } from "./gates/review-gate-handler.js";
+export type { ReviewGateHandlerOptions } from "./gates/review-gate-handler.js";

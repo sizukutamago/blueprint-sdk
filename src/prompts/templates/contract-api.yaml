@@ -1,0 +1,54 @@
+# API Contract Template
+# 自社が公開する HTTP API エンドポイントの仕様
+# {{placeholder}} をユーザー入力で置き換える
+
+id: CON-{{name}}
+type: api
+version: 1.0.0
+status: draft
+owner: "{{owner}}"
+updated_at: "{{date}}"
+
+links:
+  implements: [{{fr_ids}}]
+  depends_on: [{{depends_on}}]
+  decided_by: [{{decided_by}}]
+  impacts: []
+
+# ── API 定義 ──
+method: {{method}}               # GET | POST | PUT | PATCH | DELETE
+path: {{path}}                   # /api/...
+
+input:
+  content_type: application/json
+  body:
+    {{field_name}}:
+      type: {{type}}             # string | integer | number | boolean | array | object
+      required: {{required}}     # true | false
+      # 以下はオプション（該当するもののみ）
+      # min: N
+      # max: N
+      # min_items: N
+      # pattern: "regex"
+      # enum: [a, b, c]
+
+output:
+  success:
+    status: {{status_code}}      # 200 | 201 | 204
+    body:
+      {{field_name}}: { type: {{type}}, description: "{{description}}" }
+  errors:
+    - status: {{error_status}}
+      code: {{error_code}}
+      description: "{{error_description}}"
+
+business_rules:
+  - id: BR-001
+    rule: "{{rule_description}}"
+
+# オプション: 状態遷移がある場合
+# state_transition:
+#   entity: {{entity_name}}
+#   initial: {{initial_state}}
+#   transitions:
+#     {{state}}: [{{next_states}}]

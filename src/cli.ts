@@ -14,6 +14,7 @@ import { runParallel } from "./agents/parallel-runner.js";
 import type { ConversationEntry } from "./interactive/summary.js";
 import type { PipelineOptions, PipelineMode, StageId, QueryFn } from "./types.js";
 import { toErrorMessage } from "./utils/to-error-message.js";
+import { initBlueprint } from "./config/init.js";
 
 const VERSION = "0.1.0";
 
@@ -382,8 +383,22 @@ async function main(): Promise<void> {
   // Claude Code のネスト起動を可能にする（プロセス起動時に1回だけ）
   delete process.env.CLAUDECODE;
 
+  // `npx blueprint init` サブコマンド
+  if (process.argv[2] === "init") {
+    const projectRoot = path.resolve(process.argv[3] ?? process.cwd());
+    initBlueprint(projectRoot);
+    console.log(`[blueprint] .blueprint/ を初期化しました: ${projectRoot}`);
+    return;
+  }
+
   const args = parseCliArgs(process.argv.slice(2));
   const projectRoot = path.resolve(args.cwd);
+
+  // .blueprint/ がなければ自動生成
+  if (!fs.existsSync(path.join(projectRoot, ".blueprint"))) {
+    initBlueprint(projectRoot);
+  }
+
   const queryFn: QueryFn = (prompt) => claudeQuery(prompt, { cwd: projectRoot });
 
   if (args.interactive) {

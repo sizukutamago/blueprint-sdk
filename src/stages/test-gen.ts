@@ -1,5 +1,6 @@
 import type { StageHandler, StageResult, QueryFn } from "../types.js";
 import { toErrorMessage } from "../utils/to-error-message.js";
+import { loadPromptFile } from "../config/prompt-loader.js";
 
 export interface TestGenHandlerOptions {
   queryFn: QueryFn;
@@ -7,19 +8,31 @@ export interface TestGenHandlerOptions {
 
 export function createTestGenHandler(options: TestGenHandlerOptions): StageHandler {
   return async (state, _pipelineOptions): Promise<StageResult> => {
-    const prompt = `You are working on the project at ${state.project_root}.
-Read CLAUDE.md for project requirements and conventions.
-Read the contracts/ directory for design specifications.
+    const projectRoot = state.project_root;
 
-Generate comprehensive tests in a tests/ directory based on the contracts.
-- Unit tests for ALL pure functions and modules (game logic, utilities)
-- Server/API tests: test WebSocket message handling, room management, session lifecycle
-- Integration tests for server/client interaction where applicable
-- Use the test framework specified in CLAUDE.md (or vitest by default)
-- Tests should be runnable with \`npm run test\`
-- Cover edge cases, error paths, and boundary conditions
-- Use concrete assertions (exact values, not just \`toBeGreaterThan(0)\`)
-- Avoid conditional assertions that silently pass (no \`if (result) expect(...)\` patterns)`;
+    const testRules = loadPromptFile("core/test-generation-rules.md", projectRoot);
+    const testRulesDetail = loadPromptFile("core/test-generation-rules-detail.md", projectRoot);
+    const testingDefaults = loadPromptFile("defaults/testing.md", projectRoot);
+
+    const prompt = `You are working on the project at ${projectRoot}.
+Read CLAUDE.md for project requirements and conventions.
+Read the .blueprint/contracts/ directory for YAML contract specifications.
+
+## Test Generation Rules
+${testRules}
+
+## Test Generation Rules (Detail)
+${testRulesDetail}
+
+## Testing Defaults
+${testingDefaults}
+
+Generate tests based on the contracts:
+- Level 1: Structure validation tests (should pass immediately)
+- Level 2: Implementation verification tests (RED stubs with AAA skeleton)
+- Include @generated and @contract traceability comments
+- Use concrete assertions (exact values, not just toBeGreaterThan(0))
+- Avoid conditional assertions that silently pass`;
 
     try {
       await options.queryFn(prompt);

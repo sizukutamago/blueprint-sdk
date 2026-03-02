@@ -4,7 +4,9 @@ import { createTestGenHandler } from "./stages/test-gen.js";
 import { createImplementHandler } from "./stages/implement.js";
 import { createDocsHandler } from "./stages/docs.js";
 import { createNoopGateHandler } from "./gates/noop-gate.js";
+import { createReviewGateHandler } from "./gates/review-gate-handler.js";
 import { claudeQuery } from "./query.js";
+import { loadConfig } from "./config/loader.js";
 import type { StageHandler, QueryFn } from "./types.js";
 
 type GateStageId =
@@ -69,14 +71,25 @@ export function createDefaultPipeline(
   const implQueryFn = createStageQueryFn(queryFn, cwd, getMaxTurns("stage_3_implement"), taskDescription);
   const docsQueryFn = createStageQueryFn(queryFn, cwd, getMaxTurns("stage_4_docs"), taskDescription);
 
+  // Gate タイプを config から決定
+  const config = cwd ? loadConfig(cwd) : undefined;
+  const gateType = config?.gates.type ?? "noop";
+
+  function defaultGate(gate: "contract" | "test" | "code" | "doc"): StageHandler {
+    if (gateType === "review" && cwd) {
+      return createReviewGateHandler({ gate, queryFn, projectRoot: cwd });
+    }
+    return createNoopGateHandler();
+  }
+
   engine.register("stage_1_spec", stages?.stage_1_spec ?? createSpecHandler({ queryFn: specQueryFn }));
-  engine.register("contract_review_gate", gates?.contract_review_gate ?? createNoopGateHandler());
+  engine.register("contract_review_gate", gates?.contract_review_gate ?? defaultGate("contract"));
   engine.register("stage_2_test", stages?.stage_2_test ?? createTestGenHandler({ queryFn: testQueryFn }));
-  engine.register("test_review_gate", gates?.test_review_gate ?? createNoopGateHandler());
+  engine.register("test_review_gate", gates?.test_review_gate ?? defaultGate("test"));
   engine.register("stage_3_implement", stages?.stage_3_implement ?? createImplementHandler({ queryFn: implQueryFn }));
-  engine.register("code_review_gate", gates?.code_review_gate ?? createNoopGateHandler());
+  engine.register("code_review_gate", gates?.code_review_gate ?? defaultGate("code"));
   engine.register("stage_4_docs", stages?.stage_4_docs ?? createDocsHandler({ queryFn: docsQueryFn }));
-  engine.register("doc_review_gate", gates?.doc_review_gate ?? createNoopGateHandler());
+  engine.register("doc_review_gate", gates?.doc_review_gate ?? defaultGate("doc"));
 
   return engine;
 }

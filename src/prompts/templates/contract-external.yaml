@@ -1,0 +1,51 @@
+# External Contract Template
+# 他社 API を呼び出す側の仕様
+# {{placeholder}} をユーザー入力で置き換える
+
+id: CON-{{name}}
+type: external
+version: 1.0.0
+status: draft
+owner: "{{owner}}"
+updated_at: "{{date}}"
+
+links:
+  implements: [{{fr_ids}}]
+  depends_on: []
+  decided_by: [{{decided_by}}]
+  impacts: [{{impacts}}]
+
+# ── 外部 API 情報 ──
+provider: "{{provider_name}}"
+api_version: "{{api_version}}"   # オプション
+docs_url: "{{docs_url}}"         # オプション
+
+endpoint:
+  method: {{method}}
+  url: "{{endpoint_url}}"
+
+# 自分が送るリクエスト
+request:
+  auth: "{{auth_scheme}}"        # Bearer xxx, Basic xxx, API-Key xxx
+  body:
+    {{field_name}}:
+      type: {{type}}
+      required: {{required}}
+      # value: "fixed_value"     # 固定値の場合
+      # description: "説明"
+
+# 相手が返すレスポンス
+response:
+  success:
+    status: {{status_code}}
+    body:
+      {{field_name}}: { type: {{type}} }
+  errors:
+    - type: {{error_type}}
+      description: "{{error_description}}"
+      handling: "{{handling_strategy}}"
+
+# 自分側の制約
+constraints:
+  - id: EC-001
+    rule: "{{constraint_description}}"

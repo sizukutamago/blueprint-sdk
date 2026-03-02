@@ -1,0 +1,61 @@
+# File Contract Template
+# ファイル連携（CSV/バッチ等）の仕様
+# {{placeholder}} をユーザー入力で置き換える
+
+id: CON-{{name}}
+type: file
+version: 1.0.0
+status: draft
+owner: "{{owner}}"
+updated_at: "{{date}}"
+
+links:
+  implements: [{{fr_ids}}]
+  depends_on: []
+  decided_by: [{{decided_by}}]
+  impacts: [{{impacts}}]
+
+# ── ファイル定義 ──
+direction: {{direction}}         # import | export
+format: {{format}}               # csv | tsv | json | xml
+encoding: utf-8
+delimiter: ","                   # CSV/TSV の場合
+has_header: true
+max_file_size: "{{max_size}}"    # 例: 10MB
+max_rows: {{max_rows}}           # 例: 10000
+
+columns:
+  - name: {{column_name}}
+    type: {{type}}               # string | integer | number | boolean
+    required: {{required}}
+    description: "{{description}}"
+    # 以下はオプション（該当するもののみ）
+    # pattern: "regex"
+    # min: N
+    # max: N
+    # max_length: N
+    # enum: [a, b, c]
+    # default: "value"
+
+processing_rules:
+  - id: PR-001
+    rule: "{{rule_description}}"
+
+result:
+  success:
+    body:
+      total_rows: { type: integer }
+      # 追加フィールド
+  error:
+    body:
+      failed_rows:
+        type: array
+        items:
+          row_number: { type: integer }
+          column: { type: string }
+          error: { type: string }
+
+# オプション: サンプルデータ
+# example: |
+#   header1,header2,...
+#   value1,value2,...
